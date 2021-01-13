@@ -1,0 +1,308 @@
+#Recurrent Neural Network For Weather Prediction
+
+###Start spark application and set configuration
+
+spark
+
+%%configure -f
+{ "conf":{
+"spark.pyspark.python": "python3",
+"spark.pyspark.virtualenv.enabled": "true",
+"spark.pyspark.virtualenv.type":"native",
+"spark.pyspark.virtualenv.bin.path":"/usr/bin/virtualenv"
+}}
+
+###install python libraries
+
+sc.install_pypi_package("pandas")
+sc.install_pypi_package("sklearn")
+sc.install_pypi_package("tensorflow")
+sc.install_pypi_package("elephas")
+sc.install_pypi_package("keras")
+sc.install_pypi_package("request")
+
+###Retrieving data from Dark Sky API
+
+import csv
+import requests
+import pandas as pd
+import time
+def retrieve_data():
+    def converTime(dt):
+        timeArray = time.strptime(dt, "%Y-%m-%d")
+        timestamp = time.mktime(timeArray).__int__()
+        return timestamp
+
+
+    def converBack(ts):
+        time_format = time.localtime(ts)
+        dt = time.strftime("%Y-%m-%d %H:%M", time_format)
+        return str(dt)
+
+
+    def plusOneDay(dt):
+        end_date = pd.to_datetime(dt) + pd.DateOffset(days=1)
+        return str(end_date)[0:10]
+
+    # Using Loop to control the message number of Temperature
+    start_date = "2018-11-1"
+    day_num = 150
+    output_file = open(
+        file="/result/dataset",
+        mode="wt",
+        newline="")
+    csv_writer = csv.writer(output_file)
+    csv_writer.writerow(["time", "summary","icon","precipIntensity","precipProbability","precipType","temperature",
+                         "apparentTemperature","dewPoint","humidity","pressure","windSpeed","windGust","windBearing",
+                         "cloudCover","uvIndex","visibility","ozone"])
+    for i in range(day_num):
+        time_stamp = converTime(start_date)
+        # Call Dark Sky api to retrieve the temperature of specific date
+        DALLAS = 32.7767, -96.7970
+        api_key = "4650359a111dac80aafb7fa8d846f0cb"
+        url_template = "https://api.darksky.net/forecast/{}/{},{},{}?exclude=currently,flags,daily"
+        request_url = url_template.format(api_key, DALLAS[0], DALLAS[1], time_stamp)
+        response = requests.get(request_url)
+        json_data = response.json()
+        for i in range(len(json_data["hourly"]["data"])):
+            # Save the result as CSV rows
+            time_column = json_data["hourly"]["data"][i]["time"]
+            converted_time = converBack(time_column)
+            summary_column = "None"
+            icon_column = "None"
+            precipIntensity_column = "None"
+            precipProbability_column = "None"
+            precipType_column = "None"
+            temperature_column = "None"
+            apparentTemperature_column = "None"
+            dewPoint_column = "None"
+            humidity_column = "None"
+            pressure_column = "None"
+            windSpeed_column = "None"
+            windGust_column = "None"
+            windBearing_column = "None"
+            cloudCover_column = "None"
+            uvIndex_column = "None"
+            visibility_column = "None"
+            if("summary" in json_data["hourly"]["data"][i]):
+                summary_column = json_data["hourly"]["data"][i]["summary"]
+            if ("icon" in json_data["hourly"]["data"][i]):
+                icon_column = json_data["hourly"]["data"][i]["icon"]
+            if ("precipIntensity" in json_data["hourly"]["data"][i]):
+                precipIntensity_column = json_data["hourly"]["data"][i]["precipIntensity"]
+            if ("precipProbability" in json_data["hourly"]["data"][i]):
+                precipProbability_column = json_data["hourly"]["data"][i]["precipProbability"]
+            if ("precipType" in json_data["hourly"]["data"][i]):
+                precipType_column = json_data["hourly"]["data"][i]["precipType"]
+            if ("temperature" in json_data["hourly"]["data"][i]):
+                temperature_column = json_data["hourly"]["data"][i]["temperature"]
+            if ("apparentTemperature" in json_data["hourly"]["data"][i]):
+                apparentTemperature_column = json_data["hourly"]["data"][i]["apparentTemperature"]
+            if ("dewPoint" in json_data["hourly"]["data"][i]):
+                dewPoint_column = json_data["hourly"]["data"][i]["dewPoint"]
+            if ("humidity" in json_data["hourly"]["data"][i]):
+                humidity_column = json_data["hourly"]["data"][i]["humidity"]
+            if ("pressure" in json_data["hourly"]["data"][i]):
+                pressure_column = json_data["hourly"]["data"][i]["pressure"]
+            if ("windSpeed" in json_data["hourly"]["data"][i]):
+                windSpeed_column = json_data["hourly"]["data"][i]["windSpeed"]
+            if ("windGust" in json_data["hourly"]["data"][i]):
+                windGust_column = json_data["hourly"]["data"][i]["windGust"]
+            if ("windBearing" in json_data["hourly"]["data"][i]):
+                windBearing_column = json_data["hourly"]["data"][i]["windBearing"]
+            if ("cloudCover" in json_data["hourly"]["data"][i]):
+                cloudCover_column = json_data["hourly"]["data"][i]["cloudCover"]
+            if ("uvIndex" in json_data["hourly"]["data"][i]):
+                uvIndex_column =  json_data["hourly"]["data"][i]["uvIndex"]
+            if ("visibility" in json_data["hourly"]["data"][i]):
+                visibility_column = json_data["hourly"]["data"][i]["visibility"]
+            csv_writer.writerow([converted_time, summary_column,icon_column,precipIntensity_column,precipProbability_column,precipType_column,temperature_column,
+                                 apparentTemperature_column,dewPoint_column,humidity_column,pressure_column,windSpeed_column,windGust_column,windBearing_column,
+                                 cloudCover_column,uvIndex_column,visibility_column])
+        # End modification and exit IO execution
+        start_date = plusOneDay(start_date)
+    output_file.close()
+
+###Using spark dataframe to prepocess data
+
+weather_rawdata = spark.read.option("header","true"). option("inferSchema","true").csv("s3://weatherprediction/dataset")
+
+weather_rawdata.show()
+
+raw_data = weather_rawdata.select("time","temperature")
+
+raw_data.show()
+
+###Implementation of LSTM
+
+from keras import *
+from keras import backend as K
+from keras.engine.base_layer import Layer
+from keras.layers import Dense, RNN
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.metrics import mean_squared_error
+from keras.legacy import interfaces
+
+class CustomLSTMCell(Layer):
+    def __init__(self, units_num, **kwargs):
+        super(CustomLSTMCell, self).__init__(**kwargs)
+        self.units_num = units_num
+        self.state_size = (self.units_num, self.units_num)
+        self.output_size = self.units_num
+
+    def build(self, input_shape):
+        input_dim = input_shape[-1]
+        w_shape = (input_dim, self.units_num * 4)
+        u_shape = (self.units_num, self.units_num * 4)
+
+        # initialize kernel, recurrent kernal and bias matrix
+        self.w = self.add_weight(shape=w_shape, name='matrix_w', initializer='glorot_uniform')
+
+        self.u = self.add_weight(shape=u_shape, name='matrix_u', initializer='orthogonal')
+
+        self.bias = np.zeros(self.units_num * 4)
+        self.bias[self.units_num:self.units_num * 2] = 1.
+
+        self.built = True
+
+    def call(self, cell_inputs, cell_states):
+        h_t_1 = cell_states[0]
+        c_t_1 = cell_states[1]
+
+        temp = K.dot(cell_inputs, self.w) + K.dot(h_t_1, self.u) + self.bias
+        temp_i = temp[:, 0:self.units_num]
+        temp_f = temp[:, self.units_num:self.units_num * 2]
+        temp_c = temp[:, self.units_num * 2:self.units_num * 3]
+        temp_o = temp[:, self.units_num * 3:self.units_num * 4]
+
+        i_t = K.sigmoid(temp_i)
+        f_t = K.sigmoid(temp_f)
+        c_t = f_t * c_t_1 + i_t * K.tanh(temp_c)
+        o_t = K.sigmoid(temp_o)
+
+        h_t = o_t * K.tanh(c_t)
+
+        return h_t, [h_t, c_t]
+
+    def get_config(self):
+        config = {'units_num': self.units_num}
+        base_config = super(CustomLSTMCell, self).get_config()
+        return dict(list(base_config.items()) + list(config.items()))
+
+
+
+class LSTMLayer(RNN):
+    @interfaces.legacy_recurrent_support
+    def __init__(self, units,
+                 activity_regularizer=None,
+                 return_sequences=False,
+                 return_state=False,
+                 go_backwards=False,
+                 stateful=False,
+                 unroll=False,
+                 **kwargs):
+
+        cell = CustomLSTMCell(units)
+        super(LSTMLayer, self).__init__(cell,
+                                   return_sequences=return_sequences,
+                                   return_state=return_state,
+                                   go_backwards=go_backwards,
+                                   stateful=stateful,
+                                   unroll=unroll,
+                                   **kwargs)
+        self.activity_regularizer = regularizers.get(activity_regularizer)
+
+    def call(self, inputs, mask=None, training=None, initial_state=None):
+        self.cell._dropout_mask = None
+        self.cell._recurrent_dropout_mask = None
+        return super(LSTMLayer, self).call(inputs,
+                                      mask=mask,
+                                      training=training,
+                                      initial_state=initial_state)
+
+    @property
+    def units(self):
+        return self.cell.units_num
+
+    def get_config(self):
+        config = {'units': self.units}
+        base_config = super(LSTMLayer, self).get_config()
+        del base_config['cell']
+        return dict(list(base_config.items()) + list(config.items()))
+
+    @classmethod
+    def from_config(cls, config):
+        return cls(**config)
+
+
+
+data_set = raw_data.select("temperature").collect()
+
+# scale the dataset to [0, 1]
+data_scale_tool = MinMaxScaler(feature_range=(0, 1))
+data_set = data_scale_tool.fit_transform(data_set)
+
+# split dataset into training set and testing set
+training_set_size = int(len(data_set) * 0.67)
+testing_set_size = len(data_set) - training_set_size
+training_set, testing_set = data_set[0:training_set_size, :], data_set[training_set_size:len(data_set), :]
+
+import numpy as np
+def create_my_data_set(data_set, prev_data_length=1):
+    x, y = [], []
+    for i in range(len(data_set) - prev_data_length - 1):
+        a = data_set[i:(i + prev_data_length), 0]
+        x.append(a)
+        y.append(data_set[i + prev_data_length, 0])
+    return np.array(x), np.array(y)
+
+# preprocess training set and testing set, add previous weather data for LSTM
+prev_data_length = 4
+num_of_units = 5
+training_set_x, training_set_y = create_my_data_set(training_set, prev_data_length)
+testing_set_x, testing_set_y = create_my_data_set(testing_set, prev_data_length)
+
+# transfer input into [samples, time steps, features]
+training_set_x = np.reshape(training_set_x, (training_set_x.shape[0], 1, training_set_x.shape[1]))
+testing_set_x = np.reshape(testing_set_x, (testing_set_x.shape[0], 1, testing_set_x.shape[1]))
+
+###Create and fit the Keras LSTM model
+
+keras_model = Sequential()
+keras_model.add(LSTMLayer(num_of_units, input_shape=(1, prev_data_length)))
+keras_model.add(Dense(1))
+keras_model.compile(loss='mean_squared_error', optimizer='adam')
+keras_model.fit(training_set_x, training_set_y, epochs=100, batch_size=1, verbose=2)
+
+# make predictions on training set and testing set
+training_set_predict = keras_model.predict(training_set_x)
+testing_set_predict = keras_model.predict(testing_set_x)
+
+###Error Result with using Keras model
+
+# calculate root mean squared error
+import math
+training_set_predict_score = math.sqrt(mean_squared_error(training_set_y, training_set_predict))
+print('Train Score: %.5f RMSE' % (training_set_predict_score))
+testing_set_predict_score = math.sqrt(mean_squared_error(testing_set_y, testing_set_predict))
+print('Test Score: %.5f RMSE' % (testing_set_predict_score))
+
+###Using elephas wrap keras and fit the traing dataset in distributed way
+
+from elephas.spark_model import SparkModel
+from elephas import optimizers as elephas_optimizers
+from elephas.utils.rdd_utils import to_simple_rdd
+adagrad = elephas_optimizers.Adagrad()
+spark_model = SparkModel(keras_model, frequency='epoch', mode='synchronous', custom_objects={'LSTMLayer':LSTMLayer, 'CustomLSTMCell':CustomLSTMCell})
+rdd = to_simple_rdd(sc, training_set_x, training_set_y)
+
+spark_model.fit(rdd, epochs=100, batch_size=1, verbose=2, validation_split=0.1)
+training_set_predict_spark=spark_model.predict(training_set_x)
+testing_set_predict_spark=spark_model.predict(testing_set_x)
+
+###Error Result with using Elephas
+
+training_set_predict_score = math.sqrt(mean_squared_error(training_set_y, training_set_predict_spark))
+print('Train Score: %.5f RMSE' % (training_set_predict_score))
+testing_set_predict_score = math.sqrt(mean_squared_error(testing_set_y, testing_set_predict_spark))
+print('Test Score: %.5f RMSE' % (testing_set_predict_score))
